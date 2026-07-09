@@ -1,3 +1,15 @@
+## Forked by (ZSPFX):
+
+### ★ Overview:
+- Added support for `<music_filename>.art` for Discord RPC custom track cover.
+- Handled `SDL_EVENT_WINDOW_MOUSE_LEAVE` properly for KDE Plasma Alt+F4 to work.
+
+### .art File Support
+
+This let you set a custom track image for Discord RPC "Listening to...".
+Simply create a `<music_filename>.art` next to the song then paste the image URL in there, Tauon should auto-detect it when the song is played.
+
+---
 
 <img src="extra/tauonmb.svg" height="100px" >
 
