@@ -13038,6 +13038,18 @@ class Tauon:
 		return self.prefs.enable_lb
 
 	def get_album_art_url(self, tr: TrackClass) -> str | None:
+		# Load .art file for public art url .. take full priolity over anything else.
+		base_filename = os.path.splitext(tr.filename)[0]
+		art_file_path = os.path.join(tr.parent_folder_path, base_filename + ".art")
+		
+		if os.path.isfile(art_file_path):
+			try:
+				with open(art_file_path, "r", encoding="utf-8") as f:
+					art_url = f.read().strip()
+				if art_url:
+					return art_url
+			except Exception:
+				logging.exception("Error reading local .art file")
 		artist = tr.album_artist
 		if not tr.album:
 			return None
@@ -53346,6 +53358,14 @@ def main(holder: Holder) -> None:
 					gui.mouse_in_window = False
 					gui.update += 1
 					power = 1000
+
+				elif event.type == sdl3.SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+					# Handle close request from things like Alt F4 n other keys
+					if gui.tray_active and prefs.min_to_tray and not inp.key_shift_down:
+						tauon.min_to_tray()
+					else:
+						tauon.exit("Window received close request")
+						break
 
 		if mouse_moved and tauon.fields.test():
 			gui.update += 1
