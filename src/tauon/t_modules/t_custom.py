@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Callable
 import sdl3
 
 from tauon.t_modules.t_enums import Backend, PlayingState
-from tauon.t_modules.t_extra import ColourRGBA, get_display_time
+from tauon.t_modules.t_extra import ColourRGBA, atomic_save, get_display_time
 
 if TYPE_CHECKING:
 	from tauon.t_modules.t_main import Tauon
@@ -162,12 +162,12 @@ class MilkDropWidget(Widget):
 		ddt = tauon.ddt
 		inp = tauon.inp
 		rect = (round(x), round(y), round(w), round(h))
-		ddt.rect(rect, ColourRGBA(8, 8, 8, 255))
 		tauon.fields.add(rect)
 		track = tauon.pctl.show_object()
 		hover = tauon.coll(rect) and tauon.is_level_zero(False)
 
 		if not tauon.prefs.milk:
+			ddt.rect(rect, ColourRGBA(8, 8, 8, 255))
 			ddt.text_background_colour = ColourRGBA(8, 8, 8, 255)
 			ddt.text(
 				(rect[0] + rect[2] // 2, rect[1] + rect[3] // 2 - round(8 * gui.scale), 2),
@@ -193,7 +193,14 @@ class MilkDropWidget(Widget):
 				tauon.milky.render()
 				show_vis = True
 			if tauon.pctl.playing_state != PlayingState.PAUSED:
-				gui.delay_frame(0.007)  # 60 fps
+				gui.delay_frame(tauon.frame_pace())
+
+		if not show_vis:
+			# Nothing playing yet (fresh launch), stopped, or still warming up: the
+			# visualiser isn't covering the segment, so fill an opaque background
+			# rather than leave it transparent. While the vis is live we skip this
+			# so the frame — and its keyed-transparent pixels under Cut Out — show.
+			ddt.rect(rect, ColourRGBA(8, 8, 8, 255))
 
 		if hover:
 			if inp.mouse_click and inp.key_focused == 0 and show_vis:
@@ -209,7 +216,7 @@ class MilkDropWidget(Widget):
 		gui = tauon.gui
 		ddt = tauon.ddt
 
-		def tag(line: str, yy: int, font: int, pad_w: float, colour: ColourRGBA) -> None:
+		def tag(line: str, xx: int, yy: int, font: int, pad_w: float, colour: ColourRGBA) -> None:
 			mw = rect[2] - round(25 * gui.scale)
 			tag_w, _th = ddt.get_text_wh(line, font, max_x=mw)
 			tag_w += round(pad_w * gui.scale)
@@ -217,18 +224,18 @@ class MilkDropWidget(Widget):
 			ddt.text((xx + 6 * gui.scale, yy), line, colour, font,
 				bg=ColourRGBA(30, 30, 30, 255), max_w=mw)
 
-		xx = rect[0] + round(12 * gui.scale)
+		xx = rect[0] + round(5 * gui.scale)
 		yy = rect[1] + round(25 * gui.scale)
-		tag(tauon.milky.projectm.get_current_name(), yy, 312, 17, ColourRGBA(220, 220, 220, 255))
+		tag(tauon.milky.projectm.get_current_name(), xx, yy, 312, 17, ColourRGBA(220, 220, 220, 255))
 
 		if tauon.prefs.auto_milk:
 			yy += round(30 * gui.scale)
-			tag(_t("Auto Cycle"), yy, 12, 14, ColourRGBA(210, 210, 210, 255))
+			tag(_t("Auto Cycle"), xx, yy, 12, 14, ColourRGBA(210, 210, 210, 255))
 
 		if tauon.pctl.playing_state not in (PlayingState.PLAYING, PlayingState.URL_STREAM):
 			tauon.milky.fps.reset()
 		yy += round(30 * gui.scale)
-		tag(f"FPS: {round(tauon.milky.fps.get())}", yy, 12, 14, ColourRGBA(210, 210, 210, 255))
+		tag(f"FPS: {round(tauon.milky.fps.get())}", xx, yy, 12, 14, ColourRGBA(210, 210, 210, 255))
 
 
 class SticksVisWidget(Widget):
@@ -444,7 +451,7 @@ class SpectrogramWidget(Widget):
 			tauon.inp.right_click = False
 
 		if tauon.pctl.playing_state in (PlayingState.PLAYING, PlayingState.URL_STREAM):
-			gui.delay_frame(0.016)  # keep frames coming for the smooth scroll
+			gui.delay_frame(tauon.frame_pace())  # keep frames coming for the smooth scroll
 
 	def _ensure(self, tauon: Tauon, bins: int, w: float) -> None:
 		cls = SpectrogramWidget
@@ -1049,10 +1056,10 @@ class GalleryWidget(Widget):
 
 
 GRID_PER_ROW_MAX = 30
-# Uniform outer margin (px unscaled) around the Gallery: Compact grid — the
-# same inset the preset's narrow-window branch gives on the left, applied
-# deliberately on left/right/top so the edges match.
-GRID_MARGIN = 20
+# Uniform outer margin (px unscaled) around the Gallery: Compact grid —
+# based on the inset the preset's narrow-window branch gives on the left
+# (20), pulled in slightly, applied on left/right/top so the edges match.
+GRID_MARGIN = 15
 
 
 class GridGalleryWidget(GalleryWidget):
@@ -1689,7 +1696,7 @@ BOUNDARY_GRAB = 5
 DEFAULT_WIDGET_GUTTER = 3
 DEFAULT_WIDGET_BORDER = True
 STACK_COUNTS = [2, 3, 4, 5]
-TEMPLATES = ["Blank", "Volcano"]
+TEMPLATES = ["Blank", "Volcano", "Tracks + Gallery (Compact)"]
 
 
 class CustomLayout:
@@ -1702,9 +1709,19 @@ class CustomLayout:
 		self.gui = tauon.gui
 		self.ddt = tauon.ddt
 		self.renderer = tauon.renderer
-		self.slots: list[Node | None] = [None, None, None]  # Custom Layout A / B / C
+		# Custom layout slots: a dynamic list (create/delete via the edit
+		# context menu, always at least one). Each slot has an optional
+		# user-visible name (None = derived: "Empty Slot" for empty/Blank
+		# slots, see slot_title()). load_slots() replaces these lists.
+		self.slots: list[Node | None] = [None]
+		self.slot_names: list[str | None] = [None]
 		self.active_slot = 0
 		self._loaded = False
+		# Guards save_slots(): only True after load_slots() succeeded (or seeded
+		# a first run). While False, saving would serialise the placeholder
+		# defaults above and destroy the user's file — e.g. exiting the app from
+		# mini mode with custom_mode restored from state.p but never rendered.
+		self._save_ok = False
 
 		# Per-slot columns header-bar config: each slot remembers its own
 		# gui.pl_st (columns) / set_bar / set_mode / pl_st_left. The preset's
@@ -1712,7 +1729,7 @@ class CustomLayout:
 		# exiting custom mode restores them. _columns_owner tracks whose config
 		# gui currently holds (None = preset, else a slot index). Persisted in
 		# custom_layouts.json, not the global state.p.
-		self.slot_columns: list[dict | None] = [None, None, None]
+		self.slot_columns: list[dict | None] = [None]
 		self._preset_columns: dict | None = None
 		self._columns_owner: int | None = None
 
@@ -1757,6 +1774,8 @@ class CustomLayout:
 	def template(self, name: str) -> Node:
 		if name == "Volcano":
 			return self._template_volcano()
+		if name == "Tracks + Gallery (Compact)":
+			return self._template_tracks_gallery_compact()
 		return self._template_blank()
 
 	def _bars(self, body: Node) -> Stack:
@@ -1796,16 +1815,66 @@ class CustomLayout:
 		body.weight = 1.0
 		return self._bars(body)
 
-	def _default_tree(self) -> Node:
-		"""An unconfigured slot starts as the Blank template."""
-		return self.template("Blank")
+	def _template_tracks_gallery_compact(self) -> Node:
+		# "Tracks + Gallery (Compact)": a resizable split of the tracklist
+		# beside a compact gallery (3 albums per row).
+		tracks = self._leaf("tracklist")
+		tracks.weight = 0.81
+		gallery = self._leaf("gallery_grid")
+		gallery.weight = 1.19
+		if gallery.widget is not None:
+			gallery.widget.set_config({"per_row": 3, "spacing": 4, "v_spacing": 4, "titles": True})
+		body = Stack("h", [tracks, gallery])
+		body.weight = 1.0
+		body.resizable = True
+		return self._bars(body)
 
 	def ensure_slot(self) -> Node:
 		if not self._loaded:
 			self.load_slots()
 		if self.slots[self.active_slot] is None:
-			self.slots[self.active_slot] = self._default_tree()
+			# An empty slot materialises as the Blank template (bars + empty
+			# scalable middle) — that's what "Empty Slot" means.
+			self.slots[self.active_slot] = self.template("Blank")
 		return self.slots[self.active_slot]
+
+	# -- slot names ------------------------------------------------------------
+
+	@staticmethod
+	def _is_blank_tree(root: Node | None) -> bool:
+		"""True when the tree has no content widgets (only the top/playback bars
+		and empty cells) — i.e. it is the Blank template or equivalent."""
+		if root is None:
+			return True
+
+		def walk(n: Node) -> bool:
+			if isinstance(n, Stack):
+				return all(walk(c) for c in n.children)
+			if isinstance(n, Leaf) and n.widget is not None:
+				return n.widget.kind in ("top_panel", "playback_panel")
+			return True
+		return walk(root)
+
+	def slot_title(self, slot: int) -> str:
+		"""The user-visible name of a slot, shown in the corner layout menu.
+		Renaming or loading a template sets an explicit name; unnamed slots
+		derive one: "Empty Slot" when empty/Blank, else a generic label."""
+		if not 0 <= slot < len(self.slots):
+			return _t("Empty Slot")
+		name = self.slot_names[slot]
+		if name:
+			return name
+		if self._is_blank_tree(self.slots[slot]):
+			return _t("Empty Slot")
+		return _t("Custom Layout")
+
+	def _refresh_layout_menu(self) -> None:
+		"""Rebuild the corner layout menu's slot entries (names/count changed).
+		The rebuild function is installed by t_main's menu construction; absent
+		in headless tests."""
+		cb = getattr(self.tauon, "rebuild_layout_menu", None)
+		if callable(cb):
+			cb()
 
 	# -- persistence ---------------------------------------------------------
 
@@ -1818,28 +1887,54 @@ class CustomLayout:
 			p = self._path()
 			if p.is_file():
 				data = json.loads(p.read_text(encoding="utf-8"))
-				for i in range(len(self.slots)):
-					d = data.get(str(i))
-					self.slots[i] = node_from_dict(d) if d else None
+				# Slots are numbered keys "0".."n-1"; read consecutively so the
+				# count is whatever was saved (legacy files hold three).
+				slots: list[Node | None] = []
+				i = 0
+				while str(i) in data:
+					d = data[str(i)]
+					slots.append(node_from_dict(d) if d else None)
+					i += 1
+				if not slots:
+					slots = [None]
+				self.slots = slots
+				names = data.get("names")
+				self.slot_names = [
+					(names.get(str(i)) if isinstance(names, dict) else None) or None
+					for i in range(len(slots))
+				]
 				# Which slot was last active (so a restart into custom mode
 				# resumes the same layout).
 				a = data.get("active")
-				if isinstance(a, int) and 0 <= a < len(self.slots):
-					self.active_slot = a
+				self.active_slot = a if isinstance(a, int) and 0 <= a < len(self.slots) else 0
 				# Per-slot columns header-bar config.
 				cols = data.get("columns")
-				if isinstance(cols, dict):
-					for i in range(len(self.slot_columns)):
-						c = cols.get(str(i))
-						self.slot_columns[i] = c if isinstance(c, dict) else None
+				self.slot_columns = [
+					(cols.get(str(i)) if isinstance(cols, dict) else None)
+					for i in range(len(slots))
+				]
+				self.slot_columns = [c if isinstance(c, dict) else None for c in self.slot_columns]
 			else:
-				# First run (no saved layouts): seed slot A with the Volcano
-				# template so a fresh install ships with a ready-made layout.
-				self.slots[0] = self.template("Volcano")
+				# First run (no saved layouts): seed ready-made layouts plus one
+				# empty slot.
+				self.slots = [
+					self.template("Volcano"),
+					self.template("Tracks + Gallery (Compact)"),
+					None,
+				]
+				self.slot_names = ["Volcano", "Tracks + Gallery (Compact)", None]
+				self.slot_columns = [None, None, None]
+			self._save_ok = True
 		except Exception:
+			# _save_ok stays False: the file may hold layouts we couldn't read,
+			# so refuse to overwrite it for the rest of the session.
 			logging.exception("Failed to load custom layouts")
+		self._refresh_layout_menu()
 
 	def save_slots(self) -> None:
+		if not self._save_ok:
+			logging.warning("Refusing to save custom layouts: current file was never successfully loaded")
+			return
 		try:
 			# Capture the live columns into the active slot so edits made via the
 			# header bar (resize/reorder/hide) are persisted.
@@ -1847,8 +1942,10 @@ class CustomLayout:
 				self.slot_columns[self._columns_owner] = self._capture_columns()
 			data = {str(i): (s.to_dict() if s else None) for i, s in enumerate(self.slots)}
 			data["active"] = self.active_slot
+			data["names"] = {str(i): n for i, n in enumerate(self.slot_names) if n}
 			data["columns"] = {str(i): c for i, c in enumerate(self.slot_columns) if c is not None}
-			self._path().write_text(json.dumps(data, indent=1), encoding="utf-8")
+			with atomic_save(self._path(), "w") as file:
+				file.write(json.dumps(data, indent=1))
 		except Exception:
 			logging.exception("Failed to save custom layouts")
 
@@ -1918,8 +2015,8 @@ class CustomLayout:
 	# -- entry / exit --------------------------------------------------------
 
 	def enter(self, slot: int | None = None) -> None:
-		"""Enter a custom layout slot (A/B/C), in view mode. slot=None re-enters
-		the last-active slot (restored from disk on first load)."""
+		"""Enter a custom layout slot, in view mode. slot=None re-enters the
+		last-active slot (restored from disk on first load)."""
 		if self.gui.radio_view:
 			# Leave radio view like any other layout pick would — a lingering
 			# radio_view flag leaks into custom mode (the main menu's "New
@@ -2144,7 +2241,63 @@ class CustomLayout:
 	def act_load_template(self, name: str) -> None:
 		self._loaded = True  # authored in memory; don't let a lazy load replace it
 		self.slots[self.active_slot] = self.template(name)
+		# The slot inherits the template's name; Blank clears it so the slot
+		# reads "Empty Slot" again.
+		self.slot_names[self.active_slot] = None if name == "Blank" else name
 		self.save_slots()
+		self._refresh_layout_menu()
+
+	def act_rename_slot(self, name: str) -> None:
+		name = name.strip()
+		if not name:
+			return
+		self.slot_names[self.active_slot] = name
+		self.save_slots()
+		self._refresh_layout_menu()
+
+	def act_new_slot(self) -> None:
+		"""Append a fresh empty slot and switch to it."""
+		self.ensure_slot()  # make sure lists are loaded before growing them
+		self.slots.append(None)
+		self.slot_names.append(None)
+		self.slot_columns.append(None)
+		self.active_slot = len(self.slots) - 1
+		self.ensure_slot()
+		self._activate_columns(self.active_slot)
+		self.save_slots()
+		self._refresh_layout_menu()
+		self.gui.pl_update = 2
+		self.gui.update_layout = True
+		self.gui.update = 2
+
+	def act_delete_slot(self) -> None:
+		"""Delete the active slot (its layout, name and columns config). The
+		list never goes empty — deleting the last slot leaves one fresh empty
+		slot. Stays in custom mode, showing the next slot."""
+		i = self.active_slot
+		del self.slots[i]
+		del self.slot_names[i]
+		del self.slot_columns[i]
+		if not self.slots:
+			self.slots = [None]
+			self.slot_names = [None]
+			self.slot_columns = [None]
+		self.active_slot = min(i, len(self.slots) - 1)
+		self.ensure_slot()
+		# gui currently holds the deleted slot's columns; discard them and
+		# adopt the new active slot's directly (going through
+		# _activate_columns would stash the dead config somewhere live).
+		cfg = self.slot_columns[self.active_slot]
+		if cfg is None:
+			cfg = self._copy_columns(self._preset_columns or self._capture_columns())
+			self.slot_columns[self.active_slot] = cfg
+		self._apply_columns(cfg)
+		self._columns_owner = self.active_slot
+		self.save_slots()
+		self._refresh_layout_menu()
+		self.gui.pl_update = 2
+		self.gui.update_layout = True
+		self.gui.update = 2
 
 	def _replace(self, root: Node, target: Node, new: Node) -> None:
 		if target is root:
@@ -2164,12 +2317,34 @@ class CustomLayout:
 		inp = self.tauon.inp
 		gui = self.gui
 
+		# Full-screen overlays (Milkdrop preset chooser, Dream Room) capture and
+		# mute the pointer themselves later in the frame. Stand down entirely so we
+		# don't neutralise the mouse first — otherwise they only ever see the muted
+		# position and hover tracking (e.g. the preset chooser's highlight) breaks.
+		if self.tauon.milk_choose.active or self.tauon.dream_room.active:
+			return
+
 		# While any menu or a message box (confirm dialog) is open, let those
 		# systems own input. The main loop already routes clicks to active menus
 		# before this runs (and menus need the real mouse position for hover), so
 		# stand down entirely — no neutralising.
 		from tauon.t_modules.t_main import Menu  # local import avoids cycle
-		if Menu.active or gui.message_box:
+		if Menu.active or gui.message_box or gui.rename_playlist_box:
+			# Edit mode: right-clicking another widget while a menu is already
+			# open re-targets the layout menu there. Without this we'd stand
+			# down, and the right-click would fall through to the widget's own
+			# renderer, which doesn't test for open menus (is_level_zero(False))
+			# and would open its normal context menu instead.
+			if gui.custom_edit and inp.right_click and not gui.message_box and not gui.rename_playlist_box:
+				for m in Menu.instances:
+					m.active = False
+				Menu.active = False
+				root = self.ensure_slot()
+				layout(root, 0, 0, self.tauon.window_size[0], self.tauon.window_size[1], gui.scale)
+				self.menu_target = leaf_at(root, inp.mouse_position[0], inp.mouse_position[1])
+				if self.menu is not None:
+					self.menu.activate(in_reference=None, position=[inp.mouse_position[0], inp.mouse_position[1]])
+				self._consume(inp)
 			return
 
 		# Corner layout/edit button — clickable in BOTH view and edit mode; opens
@@ -2521,6 +2696,41 @@ class CustomLayout:
 	def _confirm_load_template(self, name) -> None:
 		self.act_load_template(name)
 
+	def _menu_rename(self, ref=None) -> None:
+		"""Open the shared rename box (the playlist one) targeting this slot."""
+		tauon = self.tauon
+		gui = self.gui
+		# Drop back to view mode: edit mode's input handling interferes with
+		# the rename box's text entry, and the rename doesn't need it.
+		gui.custom_edit = False
+		gui.update = 2
+		box = tauon.rename_playlist_box
+		box.edit_generator = False
+		box.done_callback = self.act_rename_slot
+		box.x = tauon.inp.mouse_position[0]
+		box.y = tauon.inp.mouse_position[1]
+		# Same on-screen clamping rename_playlist() applies (the box's render
+		# clamps x itself).
+		box.y = min(box.y, round(350 * gui.scale))
+		if box.y < gui.panelY:
+			box.y = gui.panelY + round(10 * gui.scale)
+		tauon.rename_text_area.set_text(self.slot_title(self.active_slot))
+		tauon.rename_text_area.highlight_all()
+		gui.rename_playlist_box = True
+
+	def _menu_new_slot(self, ref=None) -> None:
+		self.act_new_slot()
+
+	def _menu_delete_slot(self, ref=None) -> None:
+		self.tauon.gui.message_box_confirm_callback = self._confirm_delete_slot
+		self.tauon.gui.message_box_no_callback = None
+		self.tauon.gui.message_box_confirm_reference = ()
+		self.tauon.show_message(
+			_t("Delete layout '%s'?") % self.slot_title(self.active_slot), mode="confirm")
+
+	def _confirm_delete_slot(self) -> None:
+		self.act_delete_slot()
+
 	# -- test predicates (receive the menu reference; read self.menu_target) --
 	def _t_has_widget(self, ref=None) -> bool:
 		return isinstance(self.menu_target, Leaf) and self.menu_target.widget is not None
@@ -2728,6 +2938,12 @@ class CustomLayout:
 			if isinstance(leaf, Leaf):
 				self._draw_leaf(leaf, interactive)
 
+		# Widgets receive the deferred mouse-up event above so a later widget can
+		# accept a track drop. Once every widget has had that chance, end the drag
+		# just as the standard TopPanel path does.
+		if interactive and inp.mouse_up:
+			inp.quick_drag = False
+
 		# Window-controls fallback when nothing provides them.
 		if not self._provides_window_controls(root):
 			self._draw_window_controls_fallback()
@@ -2760,7 +2976,7 @@ class CustomLayout:
 		if not found:
 			return
 		from tauon.t_modules.t_main import Menu  # local import avoids cycle
-		if Menu.active or gui.message_box:
+		if Menu.active or gui.message_box or gui.rename_playlist_box:
 			return
 		if self.drag is not None:
 			# Keep the cursor while dragging even when the pointer outruns the
@@ -2830,6 +3046,13 @@ class CustomLayout:
 		gui = self.gui
 		ddt = self.ddt
 		cx, cy, cw, ch = content_rect(leaf, gui.scale)
+		# Snap to whole pixels up front so the border (drawn below at these exact
+		# coords) and the widget's own draw rect land on the same edges. Widgets
+		# like the Art Box round their rect independently (and blit the visualiser
+		# at those rounded coords); with a fractional cx/cy that rounding pushed the
+		# art/visualiser a pixel past the float border — flush at padding 0, but a
+		# 1px overhang here, a 1px gap once padded.
+		cx, cy, cw, ch = round(cx), round(cy), round(cw), round(ch)
 		widget = leaf.widget
 
 		if widget is None:

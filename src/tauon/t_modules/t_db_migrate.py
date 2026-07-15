@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from tauon.t_modules.t_extra import RadioPlaylist, RadioStation, StarRecord, TauonPlaylist, TauonQueueItem
+from tauon.t_modules.t_extra import RadioPlaylist, RadioStation, StarRecord, TauonPlaylist, TauonQueueItem, atomic_save
 
 if TYPE_CHECKING:
 	from pathlib import Path
@@ -19,7 +19,7 @@ def migrate_star_store_71(tauon: Tauon) -> None:
 	backup_star_db = tauon.user_directory / "star.p.bak71"
 	if not backup_star_db.exists():
 		logging.info("Creating a backup Star database star.p.bak71")
-		with backup_star_db.open("wb") as file:
+		with atomic_save(backup_star_db) as file:
 			pickle.dump(tauon.star_store.db, file, protocol=pickle.HIGHEST_PROTOCOL)
 
 	new_starstore_db: dict[tuple[str, str, str], StarRecord] = {}
@@ -39,7 +39,7 @@ def migrate_star_store_71(tauon: Tauon) -> None:
 	else:
 		tauon.star_store.db = new_starstore_db
 		logging.info("Saving newly migrated StarStore db…")
-		with (tauon.user_directory / "star.p").open("wb") as file:
+		with atomic_save(tauon.user_directory / "star.p") as file:
 			pickle.dump(tauon.star_store.db, file, protocol=pickle.HIGHEST_PROTOCOL)
 
 
@@ -48,6 +48,7 @@ def database_migrate(
 	tauon: Tauon,
 	db_version: float,
 	master_library: dict[int, TrackClass],
+	legacy_track_misc: dict[int, dict],
 	install_mode: bool,
 	multi_playlist: list[str | int | bool] | list[TauonPlaylist],
 	a_cache_dir: str,
@@ -232,5 +233,55 @@ def database_migrate(
 		logging.info("Clearing search caches")
 		tauon.search_string_cache.clear()
 		tauon.search_dia_string_cache.clear()
+
+	if db_version <= 76:  # noqa: PLR2004
+		logging.info("Updating database to version 77")
+		# state.p used to pickle the loaded Milkdrop preset as a pathlib.Path,
+		# which made the save file OS-specific. It is stored as a plain string
+		# now; the loader normalises either form, so this bump only forces the
+		# post-migration save to rewrite state.p in the new format.
+
+	if db_version <= 77:  # noqa: PLR2004
+		logging.info("Updating database to version 78")
+		# The default MB4/MB5 bindings changed from toggle-gallery /
+		# toggle-right-panel to layout cycling. Edit just those lines in the
+		# user's input.txt: a button the user rebound themselves stays as-is.
+		keymap_file = config_directory / "input.txt"
+		if install_directory != config_directory and keymap_file.is_file():
+			try:
+				lines = keymap_file.read_text(encoding="utf_8").splitlines()
+				tokens = [line.split() for line in lines]
+				new_binds = []
+				if ["toggle-right-panel", "MB5"] in tokens and ["cycle-layouts", "MB5"] not in tokens:
+					lines[tokens.index(["toggle-right-panel", "MB5"])] = "toggle-right-panel"
+					new_binds.append("cycle-layouts MB5")
+				if ["toggle-gallery", "MB4"] in tokens and ["cycle-layouts-reverse", "MB4"] not in tokens:
+					lines[tokens.index(["toggle-gallery", "MB4"])] = "toggle-gallery"
+					new_binds.append("cycle-layouts-reverse MB4")
+				if new_binds:
+					keymap_file.write_text("\n".join([*lines, *new_binds]) + "\n", encoding="utf_8")
+					# The keymap loader thread starts before migrations run and
+					# has likely already read the old file — reload so the new
+					# bindings apply this launch, not just the next one.
+					gui.keymaps.maps.clear()
+					gui.keymaps.load()
+			except Exception:
+				logging.exception("Failed to update MB4/MB5 bindings in input.txt")
+
+	if db_version <= 78:  # noqa: PLR2004
+		logging.info("Updating database to version 79")
+		# Extended track metadata used to live in a catch-all TrackClass.misc
+		# dict; it now has dedicated __slots__ fields. Spread any misc data
+		# preserved from the old save format into those fields.
+		if legacy_track_misc:
+			from tauon.t_modules.t_main import _MISC_TO_FIELD  # noqa: PLC0415
+			for index, misc in legacy_track_misc.items():
+				track = master_library.get(index)
+				if track is None:
+					continue
+				for mk, mv in misc.items():
+					field = _MISC_TO_FIELD.get(mk)
+					if field is not None:
+						setattr(track, field, mv)
 
 	return master_library, multi_playlist, p_force_queue, theme, prefs, gui, gen_codes, radio_playlists
