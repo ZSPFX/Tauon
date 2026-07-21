@@ -261,7 +261,7 @@ class SubsonicService:
 					self.gui.lyrics_editor_update_now[1] = True
 				if lyrics or synced:
 					logging.info(f"Found lyrics from Subsonic server for {track_object.artist} - {track_object.title}")
-					self.gui.update += 1
+					self.gui.request_frame()
 					self.tauon.lyrics_ren_mini.to_reload = True
 					self.tauon.timed_lyrics_ren.index = -1
 					self.pctl.notify_database_changed()
@@ -462,7 +462,7 @@ class SubsonicService:
 
 			items = self._as_list(d["subsonic-response"]["directory"].get("child"))
 
-			self.gui.update = 2
+			self.gui.request_frame()
 
 			for item in items:
 				if item.get("isDir"):
@@ -501,10 +501,8 @@ class SubsonicService:
 				if "duration" in song:
 					nt.length = song["duration"]
 				# [{'name': 'Pop'}, {'name': 'Rap'}, {'name': 'Rock'}]
-				if "genres" in song:
+				if song.get("genres"):
 					genres: dict[str, str] = song["genres"]
-					if len(genres) == 0:
-						continue
 					genre_names = [g["name"] for g in genres if g.get("name")]
 					if not genre_names:
 						logging.warning(f"Failed to parse genres from subsonic, got: {genres}")

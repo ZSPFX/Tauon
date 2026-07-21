@@ -161,18 +161,15 @@ class TDraw:
 			tuple[int, str, int, int, int, int, int, int, int, int],
 			list[sdl3.SDL_FRect | sdl3.LP_SDL_Texture | int | bool],
 		] = OrderedDict()
-		self.text_texture_cache_bytes = 0
 		# The item cap is recomputed every frame (see new_frame) to fit the text
 		# actually on screen rather than a fixed guess. The main UI and the track
 		# list are counted separately because the track list re-renders on its own
 		# cadence (only when gui.pl_update fires); the cap is their sum plus 50%
-		# headroom. max_text_texture_cache_bytes still bounds memory.
+		# headroom.
 		self._frame_text_draws = 0      # non-track-list cacheable draws this frame
 		self._tracklist_text_draws = 0  # cacheable draws in the last track-list render
 		self._counting_tracklist = False
 		self.max_text_texture_cache_items = 0
-		self.max_text_texture_cache_bytes = 48 * 1024 * 1024
-		self.max_text_texture_cache_item_bytes = 256 * 1024
 		self.text_wh_cache: OrderedDict[tuple[str, int, int, bool], tuple[int, int]] = OrderedDict()
 		self.max_text_wh_cache_items = 2048
 
@@ -293,7 +290,6 @@ class TDraw:
 			sdl3.SDL_DestroyTexture(so[1])
 
 		self.ttc.clear()
-		self.text_texture_cache_bytes = 0
 		self.text_wh_cache.clear()
 
 	def new_frame(self) -> None:
@@ -302,8 +298,7 @@ class TDraw:
 		Called once at the start of each rendered frame. The cap is the number
 		of cacheable text draws in the main UI last frame plus the track list's
 		last render, with 50% headroom, so everything visible stays cached
-		instead of thrashing against a fixed limit. The byte ceiling still
-		bounds memory."""
+		instead of thrashing against a fixed limit."""
 		self.max_text_texture_cache_items = int((self._frame_text_draws + self._tracklist_text_draws) * 1.5)
 		self._frame_text_draws = 0
 		self._counting_tracklist = False
@@ -331,13 +326,11 @@ class TDraw:
 		return font_description
 
 	def get_text_wh(self, text: str, font: int, max_x: int, wrap: bool = False) -> tuple[int, int] | None:
-		cache_key = None
-		if len(text) <= 256:
-			cache_key = (text, font, max_x, wrap)
-			cached = self.text_wh_cache.get(cache_key)
-			if cached is not None:
-				self.text_wh_cache.move_to_end(cache_key)
-				return cached
+		cache_key = (text, font, max_x, wrap)
+		cached = self.text_wh_cache.get(cache_key)
+		if cached is not None:
+			self.text_wh_cache.move_to_end(cache_key)
+			return cached
 
 		self.layout.set_font_description(self._font_description(font))
 		self.layout.set_ellipsize(Pango.EllipsizeMode.END)
@@ -445,7 +438,7 @@ class TDraw:
 		force_gray = self.force_gray
 		# real_bg = True
 
-		if bg.a < 200:
+		if bg.a < 246:
 			alpha_bg = True
 			force_gray = True
 
@@ -572,7 +565,7 @@ class TDraw:
 			if force_gray:
 				options = context.get_font_options()
 				options.set_antialias(cairo.ANTIALIAS_GRAY)
-				# options.set_hint_style(cairo.HINT_STYLE_NONE)
+				options.set_hint_style(cairo.HINT_STYLE_SLIGHT)
 				context.set_font_options(options)
 			elif self.force_subpixel_text:
 				options = context.get_font_options()
@@ -634,6 +627,13 @@ class TDraw:
 
 			PangoCairo.show_layout(context, layout)
 
+			# A second, partial-strength pass over the translucent path boosts
+			# partial-coverage AA edge pixels (adding weight without touching
+			# metrics); 0.25 alpha keeps it subtle rather than a full re-draw
+			if force_gray:
+				context.set_source_rgba(colour.r / 255, colour.g / 255, colour.b / 255, 0.25)
+				PangoCairo.show_layout(context, layout)
+
 			self.was_truncated = layout.is_ellipsized()
 			surf.flush()
 			surf.finish()
@@ -689,29 +689,18 @@ class TDraw:
 		dst.y = round(y) - y_off
 
 		pack = [dst, c, y_off, self.was_truncated]
-		cache_item_bytes = w * h * 4
 		texture_cached = False
 
 		try:
 			self.__render_text(pack, x, y, range_top, range_height, align)
 
 			# Don't cache if using real background data
-			cache_texture = not real_bg and (
-				force_cache or cache_item_bytes <= self.max_text_texture_cache_item_bytes
-			)
-			if cache_texture:
-				pack.append(cache_item_bytes)
+			if not real_bg:
 				self.ttc[key] = pack
-				self.text_texture_cache_bytes += cache_item_bytes
 				texture_cached = True
-				while self.ttc and (
-					len(self.ttc) > self.max_text_texture_cache_items
-					or self.text_texture_cache_bytes > self.max_text_texture_cache_bytes
-				):
+				while self.ttc and len(self.ttc) > self.max_text_texture_cache_items:
 					old_key, so = self.ttc.popitem(last=False)
 					sdl3.SDL_DestroyTexture(so[1])
-					if len(so) > 4:
-						self.text_texture_cache_bytes -= so[4]
 		finally:
 			if c is not None and not texture_cached:
 				sdl3.SDL_DestroyTexture(c)

@@ -803,7 +803,7 @@ class Cachement:
 					if i == 3:
 						self.ready = track
 
-					self.gui.update += 1
+					self.gui.request_frame()
 					self.pctl.buffering_percent = math.floor(i / len(network_url) * 100)
 					self.gui.buffering_text = str(self.pctl.buffering_percent) + "%"
 					if self.get_now is not None and self.get_now != track:
@@ -856,7 +856,7 @@ class Cachement:
 							# time.sleep(0.03)
 							# logging.info(f"Downloading file @ {round(32 / timer.hit())} kbps")
 							if length:
-								self.gui.update += 1
+								self.gui.request_frame()
 								self.pctl.buffering_percent = round(a * 1000 / length * 100)
 								self.gui.buffering_text = str(round(a * 1000 / length * 100)) + "%"
 
@@ -1128,6 +1128,16 @@ def player4(tauon: Tauon) -> None:
 				if pctl.playing_time > 0.5:
 					gui.update_spec = 1
 
+	def run_levels() -> None:
+		if (tauon.player4_state in (PlayerState.PLAYING, PlayerState.URL_STREAM)) and gui.vis == 1:
+			amp = aud.get_level_peak_l()
+			l = amp * 12
+			amp = aud.get_level_peak_r()
+			r = amp * 12
+
+			tauon.level_train.append((0, l, r))
+			gui.level_update = True
+
 	p_sync_timer = Timer()
 
 	def track(end: bool = True) -> None:
@@ -1298,14 +1308,7 @@ def player4(tauon: Tauon) -> None:
 			break
 
 		# Level meter
-		if (tauon.player4_state in (PlayerState.PLAYING, PlayerState.URL_STREAM)) and gui.vis == 1:
-			amp = aud.get_level_peak_l()
-			l = amp * 12
-			amp = aud.get_level_peak_r()
-			r = amp * 12
-
-			tauon.level_train.append((0, l, r))
-			gui.level_update = True
+		run_levels()
 
 		if chrome_mode:
 			if tauon.chrome is None:
@@ -1518,7 +1521,7 @@ def player4(tauon: Tauon) -> None:
 								gui.buffering_text = ""
 								pctl.buffering_percent = 0
 								gui.buffering = True
-								gui.update += 1
+								gui.request_frame()
 								tauon.wake()
 							if cachement.ready == target_object and pctl.start_time_target + pctl.jump_time == 0.0:
 								break
@@ -1526,7 +1529,7 @@ def player4(tauon: Tauon) -> None:
 							# logging.info(status)
 
 						gui.buffering = False
-						gui.update += 1
+						gui.request_frame()
 						tauon.wake()
 
 						if status == 2:
@@ -1549,13 +1552,13 @@ def player4(tauon: Tauon) -> None:
 							gui.buffering_text = ""
 							pctl.buffering_percent = 0
 							gui.buffering = True
-							gui.update += 1
+							gui.request_frame()
 							tauon.wake()
 
 						time.sleep(0.05)
 
 					gui.buffering = False
-					gui.update += 1
+					gui.request_frame()
 					tauon.wake()
 
 					if status == 2:
@@ -1659,6 +1662,8 @@ def player4(tauon: Tauon) -> None:
 							if pctl.commit:
 								track(end=False)
 							time.sleep(0.016)
+							run_vis()
+							run_levels()
 						aud.stop()
 
 					set_load_net(1 if stream_url else 0)
@@ -1679,6 +1684,13 @@ def player4(tauon: Tauon) -> None:
 						if pctl.commit and tauon.player4_state == PlayerState.PLAYING:
 							track(end=False)
 						time.sleep(0.016)
+						# Keep the visualisers fed while parked here for the
+						# playout of the outgoing track — the top-of-loop
+						# run_vis()/run_levels() calls don't run again until the
+						# transition completes, which froze the spectrum and
+						# starved the spectrogram queue for several seconds.
+						run_vis()
+						run_levels()
 						if pctl.playerCommandReady and pctl.playerCommand in ("open", "stop"):
 							logging.info("JANK")
 							pctl.commit = None
@@ -1780,7 +1792,7 @@ def player4(tauon: Tauon) -> None:
 						gui.buffering = True
 						gui.buffering_text = ""
 						pctl.buffering_percent = 0
-						gui.update += 1
+						gui.request_frame()
 						tauon.wake()
 					set_load_net(1 if stream_url else 0)
 					aud.start(
@@ -1853,7 +1865,7 @@ def player4(tauon: Tauon) -> None:
 								gui.buffering_text = ""
 								pctl.buffering_percent = 0
 								gui.buffering = True
-								gui.update += 1
+								gui.request_frame()
 								tauon.wake()
 						time.sleep(0.016)
 						run_vis()
@@ -1865,7 +1877,7 @@ def player4(tauon: Tauon) -> None:
 					# if the load errored/aborted (the play loop won't run).
 					if gui.buffering and (error or not loaded_track_streamed):
 						gui.buffering = False
-						gui.update += 1
+						gui.request_frame()
 						tauon.wake()
 					if stream_fallback:
 						continue
@@ -1888,7 +1900,7 @@ def player4(tauon: Tauon) -> None:
 					loaded_track.length = t
 					if loaded_track.length != 0:
 						pctl.playing_length = loaded_track.length
-						gui.pl_update += 1
+						gui.request_tracklist_redraw()
 
 				pctl.commit = None
 				stall_timer.set()
@@ -1905,7 +1917,7 @@ def player4(tauon: Tauon) -> None:
 						if gui.buffering is False:
 							gui.buffering = True
 							gui.buffering_text = ""
-							gui.update += 1
+							gui.request_frame()
 							tauon.wake()
 					elif loaded_track.is_network:  # and loaded_track.fullpath.endswith(".ogg"):
 						timer = Timer()
@@ -1925,7 +1937,7 @@ def player4(tauon: Tauon) -> None:
 								gui.buffering_text = ""
 								pctl.buffering_percent = 0
 								gui.buffering = True
-								gui.update += 1
+								gui.request_frame()
 								tauon.wake()
 							if i * 0.05 > 2:
 								aud.pause()
@@ -1936,7 +1948,7 @@ def player4(tauon: Tauon) -> None:
 							i += 1
 
 						gui.buffering = False
-						gui.update += 1
+						gui.request_frame()
 						tauon.wake()
 						if pctl.playerCommandReady:
 							continue
@@ -2002,7 +2014,7 @@ def player4(tauon: Tauon) -> None:
 				# Clear any buffering indicator; the play loop will not run now
 				if gui.buffering:
 					gui.buffering = False
-					gui.update += 1
+					gui.request_frame()
 					tauon.wake()
 
 				if subcommand == "return":
@@ -2072,7 +2084,7 @@ def player4(tauon: Tauon) -> None:
 				buffering = aud.is_buffering()
 				if gui.buffering != buffering:
 					gui.buffering = buffering
-					gui.update += 1
+					gui.request_frame()
 
 			if tauon.player4_state == PlayerState.PLAYING:
 				if loaded_track_streamed:
@@ -2081,6 +2093,6 @@ def player4(tauon: Tauon) -> None:
 					if gui.buffering != buffering:
 						gui.buffering = buffering
 						gui.buffering_text = ""
-						gui.update += 1
+						gui.request_frame()
 						tauon.wake()
 				track()
