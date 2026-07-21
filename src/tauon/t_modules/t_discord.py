@@ -295,17 +295,43 @@ def discord_loop_entrypoint(main) -> None:
                     PlayingState.URL_STREAM,
                 )
             )
-            is_inactive = is_idle or is_paused
+            # When idle (nothing playing), immediately clear presence
+            if is_idle:
+                if not activity_hidden:
+                    try:
+                        _try_clear()
+                        _update_times.append(now)
+                        last_sent_sig         = ""
+                        last_sent_track_index = -1
+                        pending_sig           = ""
+                        pending_since         = 0.0
+                        activity_hidden       = True
+                        set_status("Idle")
+                    except Exception as exc:
+                        consecutive_failures += 1
+                        log(f"RPC clear failed ({consecutive_failures}): {exc}; will reconnect")
+                        close_rpc()
+                        next_reconnect_at = time.time() + reconnect_delay
+                        reconnect_delay   = min(reconnect_delay * 1.8, 45.0)
+                        set_status(builtins._("Reconnecting to Discord..."))
+                        wakeup.wait(timeout=0.5)
+                        wakeup.clear()
+                        continue
+                wakeup.wait(timeout=poll_interval)
+                wakeup.clear()
+                continue
 
-            if is_inactive:
+            # Not idle — could be playing or paused
+            if is_paused:
                 if idle_started_at is None:
                     idle_started_at = now
             else:
                 idle_started_at  = None
                 activity_hidden = False
 
+            # Paused: clear presence after delay if so configured
             if (
-                is_inactive
+                is_paused
                 and not prefs.discord_keep_idle
                 and not activity_hidden
                 and idle_started_at is not None
@@ -335,145 +361,132 @@ def discord_loop_entrypoint(main) -> None:
                 wakeup.wait(timeout=poll_interval)
                 wakeup.clear()
                 continue
+            current_index = (
+                main.radiobox.song_key
+                if state_now == PlayingState.URL_STREAM
+                else tr.index
+            )
 
-            if is_idle:
-                payload: dict = {
-                    "activity_type":       ActivityType.LISTENING,
-                    "status_display_type": StatusDisplayType.STATE,
-                    "pid":                 main.pid,
-                    "details":             "Tauon Music Box",
-                    "state":               "Idle",
-                    "large_image":         "tauon-standard",
-                }
-            else:
-                current_index = (
-                    main.radiobox.song_key
-                    if state_now == PlayingState.URL_STREAM
-                    else tr.index
-                )
+            if is_playing:
+                if current_index != last_track_index or not last_playing_state:
+                    start_time = now - pctl.playing_time
+                elif abs(start_time - (now - pctl.playing_time)) > 1.0:
+                    start_time = now - pctl.playing_time
 
-                if is_playing:
-                    if current_index != last_track_index or not last_playing_state:
-                        start_time = now - pctl.playing_time
-                    elif abs(start_time - (now - pctl.playing_time)) > 1.0:
-                        start_time = now - pctl.playing_time
+            station_title = ""
+            if radio_live and main.radiobox.loaded_station is not None:
+                station_title = (main.radiobox.loaded_station.title or "").strip()
 
-                station_title = ""
-                if radio_live and main.radiobox.loaded_station is not None:
-                    station_title = (main.radiobox.loaded_station.title or "").strip()
-
-                raw_title = tr.title or station_title or builtins._("Unknown Track")
-                if prefs.discord_clean_title:
-                    try:
-                        title_for_presence = main.clean_track_title(raw_title)
-                    except Exception:
-                        title_for_presence = raw_title
-                else:
-                    title_for_presence = raw_title
-
-                artist = tr.artist or builtins._("Unknown Artist")
-
-                if radio_live:
-                    if not tr.artist:
-                        # No artist tag; attribute the line to the station,
-                        # unless the station is already shown as the title
-                        artist = (
-                            builtins._("Live radio")
-                            if not tr.title
-                            else station_title or builtins._("Live radio")
-                        )
-                    album = station_title or None
-                    if album and album.lower() in (title_for_presence.lower(), artist.lower()):
-                        album = None
-                else:
-                    al    = (tr.album or "").lower()
-                    album = (
-                        None
-                        if al and al in ((tr.title or "").lower(), (tr.artist or "").lower())
-                        else tr.album
-                    )
-                if album and len(album) == 1:
-                    album += " "
-
-                if current_index != cached_art_track_index or (now - last_art_lookup) > 25:
-                    cached_art_track_index = current_index
-                    last_art_lookup        = now
-                    cached_large_image     = "tauon-standard"
-                    cached_small_image     = None
-                    rapid_skip = (now - last_sent_at) < 3.0 and current_index != last_sent_track_index
-                    if state_now != PlayingState.URL_STREAM and not rapid_skip:
-                        try:
-                            url = main.get_album_art_url(tr)
-                            if url:
-                                cached_large_image = url
-                                cached_small_image = "tauon-standard"
-                        except Exception:
-                            logging.exception("Discord cover art lookup failed")
-
-                card_layout = getattr(prefs, "discord_card_layout", "title_artist")
-                if card_layout == "artist_title":
-                    details       = safe_text(artist,             builtins._("Unknown Artist"))
-                    state_text    = safe_text(title_for_presence, builtins._("Unknown Track"))
-                    details_holds = "artist"
-                else:
-                    details       = safe_text(title_for_presence, builtins._("Unknown Track"))
-                    state_text    = safe_text(artist,             builtins._("Unknown Artist"))
-                    details_holds = "song"
-                if not details:
-                    details = builtins._("Unknown Track")
-                if not state_text:
-                    state_text = builtins._("Unknown Artist")
-
-                member_list    = getattr(prefs, "discord_member_list_display", "song")
-                status_display = (
-                    StatusDisplayType.DETAILS
-                    if member_list == details_holds
-                    else StatusDisplayType.STATE
-                )
-
-                buttons: list[dict] = []
-                if prefs.discord_lastfm_button:
-                    lfm_url = resolve_lastfm_button_url_async(main, tr.artist, tr.title)
-                    if lfm_url:
-                        buttons.append({"label": "🔎 Track Info", "url": lfm_url})
-                if prefs.discord_show_tauon_button:
-                    buttons.append({"label": "🌐 Tauon", "url": "https://tauonmusicbox.rocks/"})
-
-                payload = {
-                    "activity_type":       ActivityType.LISTENING,
-                    "status_display_type": status_display,
-                    "pid":                 main.pid,
-                    "details":             details,
-                    "state":               state_text,
-                    "large_image":         cached_large_image,
-                    "small_image":         cached_small_image,
-                }
-
-                if buttons:
-                    payload["buttons"] = buttons[:2]
-                if is_playing:
-                    payload["start"] = int(start_time)
-                    if state_now != PlayingState.URL_STREAM:
-                        payload["end"] = int(start_time + tr.length)
-                if album:
-                    payload["large_text"] = safe_text(album, "Tauon")
-                if cached_small_image:
-                    payload["small_text"] = "Tauon"
-
-                debug_state = (current_index, str(state_now), is_playing)
-                if debug_state != last_debug_state:
-                    log(f"Track/state changed idx={current_index} state={state_now} playing={is_playing}")
-                    last_debug_state = debug_state
-
-                last_track_index   = current_index
-                last_playing_state = is_playing
-
-            sig_idx = -1
-            if not is_idle:
+            raw_title = tr.title or station_title or builtins._("Unknown Track")
+            if prefs.discord_clean_title:
                 try:
-                    sig_idx = int(current_index)
+                    title_for_presence = main.clean_track_title(raw_title)
                 except Exception:
-                    sig_idx = -1
+                    title_for_presence = raw_title
+            else:
+                title_for_presence = raw_title
+
+            artist = tr.artist or builtins._("Unknown Artist")
+
+            if radio_live:
+                if not tr.artist:
+                    # No artist tag; attribute the line to the station,
+                    # unless the station is already shown as the title
+                    artist = (
+                        builtins._("Live radio")
+                        if not tr.title
+                        else station_title or builtins._("Live radio")
+                    )
+                album = station_title or None
+                if album and album.lower() in (title_for_presence.lower(), artist.lower()):
+                    album = None
+            else:
+                al    = (tr.album or "").lower()
+                album = (
+                    None
+                    if al and al in ((tr.title or "").lower(), (tr.artist or "").lower())
+                    else tr.album
+                )
+            if album and len(album) == 1:
+                album += " "
+
+            if current_index != cached_art_track_index or (now - last_art_lookup) > 25:
+                cached_art_track_index = current_index
+                last_art_lookup        = now
+                cached_large_image     = "tauon-standard"
+                cached_small_image     = None
+                rapid_skip = (now - last_sent_at) < 3.0 and current_index != last_sent_track_index
+                if state_now != PlayingState.URL_STREAM and not rapid_skip:
+                    try:
+                        url = main.get_album_art_url(tr)
+                        if url:
+                            cached_large_image = url
+                            cached_small_image = "tauon-standard"
+                    except Exception:
+                        logging.exception("Discord cover art lookup failed")
+
+            card_layout = getattr(prefs, "discord_card_layout", "title_artist")
+            if card_layout == "artist_title":
+                details       = safe_text(artist,             builtins._("Unknown Artist"))
+                state_text    = safe_text(title_for_presence, builtins._("Unknown Track"))
+                details_holds = "artist"
+            else:
+                details       = safe_text(title_for_presence, builtins._("Unknown Track"))
+                state_text    = safe_text(artist,             builtins._("Unknown Artist"))
+                details_holds = "song"
+            if not details:
+                details = builtins._("Unknown Track")
+            if not state_text:
+                state_text = builtins._("Unknown Artist")
+
+            member_list    = getattr(prefs, "discord_member_list_display", "song")
+            status_display = (
+                StatusDisplayType.DETAILS
+                if member_list == details_holds
+                else StatusDisplayType.STATE
+            )
+
+            buttons: list[dict] = []
+            if prefs.discord_lastfm_button:
+                lfm_url = resolve_lastfm_button_url_async(main, tr.artist, tr.title)
+                if lfm_url:
+                    buttons.append({"label": "🔎 Track Info", "url": lfm_url})
+            if prefs.discord_show_tauon_button:
+                buttons.append({"label": "🌐 Tauon", "url": "https://tauonmusicbox.rocks/"})
+
+            payload = {
+                "activity_type":       ActivityType.LISTENING,
+                "status_display_type": status_display,
+                "pid":                 main.pid,
+                "details":             details,
+                "state":               state_text,
+                "large_image":         cached_large_image,
+                "small_image":         cached_small_image,
+            }
+
+            if buttons:
+                payload["buttons"] = buttons[:2]
+            if is_playing:
+                payload["start"] = int(start_time)
+                if state_now != PlayingState.URL_STREAM:
+                    payload["end"] = int(start_time + tr.length)
+            if album:
+                payload["large_text"] = safe_text(album, "Tauon")
+            if cached_small_image:
+                payload["small_text"] = "Tauon"
+
+            debug_state = (current_index, str(state_now), is_playing)
+            if debug_state != last_debug_state:
+                log(f"Track/state changed idx={current_index} state={state_now} playing={is_playing}")
+                last_debug_state = debug_state
+
+            last_track_index   = current_index
+            last_playing_state = is_playing
+
+            try:
+                sig_idx = int(current_index)
+            except Exception:
+                sig_idx = -1
             payload_sig = json.dumps(payload, sort_keys=True, default=str) + f"::idx={sig_idx}"
 
             track_changed = sig_idx >= 0 and sig_idx != last_sent_track_index
@@ -495,7 +508,7 @@ def discord_loop_entrypoint(main) -> None:
             )
 
             rate_ok = _rpc_budget_ok(now) and time_since_sent >= min_gap
-            position_ok = is_idle or pctl.playing_time >= 2.0
+            position_ok = pctl.playing_time >= 2.0
 
             ready_to_send = (
                 pending_sig != last_sent_sig

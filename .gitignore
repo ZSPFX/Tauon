@@ -10,6 +10,8 @@ user-data*/
 sdl2/
 fonts/
 *.pyd
+*.so
+uv.lock
 *.pyx
 *.flac
 *.ogg
